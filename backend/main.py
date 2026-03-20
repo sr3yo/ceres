@@ -1,11 +1,13 @@
+from itertools import chain
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import requests
 import os
 import yfinance as yf
-from datetime import datetime
-from black_scholes import black_scholes, get_time_to_expiry
+from datetime import datetime, timedelta
+from black_scholes import black_scholes, get_time_to_expiry, calculate_greeks
 
 load_dotenv()
 
@@ -58,38 +60,109 @@ def analyze(ticker: str):
     stock = yf.Ticker(ticker)
     expiration_dates = stock.options
     
-    # find first future expiration date
-    today = datetime.today().strftime("%Y-%m-%d")
-    future_dates = [d for d in expiration_dates if d > today]
+    # find first future expiration date 30+ days out
+    future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
     expiry = future_dates[0]
     
     chain = stock.option_chain(expiry)
     calls = chain.calls.to_dict(orient="records")
+    puts = chain.puts.to_dict(orient="records")
 
-    results = []
+    # run black scholes on calls
+    call_results = []
     for contract in calls:
         strike = contract["strike"]
         market_premium = contract["lastPrice"]
         iv = contract["impliedVolatility"]
-
         T = get_time_to_expiry(expiry)
         
         if T > 0 and iv > 0:
-            theoretical_price = black_scholes(current_price, strike, T, 0.05, iv)
+            theoretical_price = black_scholes(current_price, strike, T, 0.05, iv, "call")
             mispricing = round(market_premium - theoretical_price, 2)
+            greeks = calculate_greeks(current_price, strike, T, 0.05, iv, "call")
             
-            results.append({
+            call_results.append({
                 "contract": contract["contractSymbol"],
+                "type": "call",
                 "strike": strike,
                 "market_premium": market_premium,
                 "theoretical_price": theoretical_price,
                 "mispricing": mispricing,
-                "overpriced": bool(mispricing > 0)
+                "overpriced": bool(mispricing > 0),
+                "greeks": greeks
             })
 
+    # run black scholes on puts
+    put_results = []
+    for contract in puts:
+        strike = contract["strike"]
+        market_premium = contract["lastPrice"]
+        iv = contract["impliedVolatility"]
+        T = get_time_to_expiry(expiry)
+        
+        if T > 0 and iv > 0:
+            theoretical_price = black_scholes(current_price, strike, T, 0.05, iv, "put")
+            mispricing = round(market_premium - theoretical_price, 2)
+            greeks = calculate_greeks(current_price, strike, T, 0.05, iv, "put")
+            
+            put_results.append({
+                "contract": contract["contractSymbol"],
+                "type": "put",
+                "strike": strike,
+                "market_premium": market_premium,
+                "theoretical_price": theoretical_price,
+                "mispricing": mispricing,
+                "overpriced": bool(mispricing > 0),
+                "greeks": greeks
+            })
+    hist = stock.history(period="30d")
+    hist["returns"] = hist["Close"].pct_change()
+    hv = hist["returns"].std() * (252 ** 0.5)
+
+    put_volume = chain.puts["volume"].sum()
+    call_volume = chain.calls["volume"].sum()
+    pcr = round(put_volume / call_volume, 2) if call_volume > 0 else 0
+
+
+
+
+
+    return {
+    "ticker": ticker,
+    "current_price": current_price,
+    "expiration_date": expiry,
+    "historical_volatility": round(float(hv), 4),
+    "put_call_ratio": float(pcr),
+    "market_sentiment": "bearish" if pcr > 1 else "bullish",
+    "calls": call_results,
+    "puts": put_results
+}
+
+
+@app.get("/volatility/{ticker}")
+def get_historical_volatility(ticker: str):
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period="30d")
+    
+    # calculate daily returns
+    hist["returns"] = hist["Close"].pct_change()
+    
+    # annualized historical volatility
+    hv = hist["returns"].std() * (252 ** 0.5)
+    
+    # put/call ratio
+    expiration_dates = stock.options
+    future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
+    expiry = future_dates[0]
+    chain = stock.option_chain(expiry)
+    
+    put_volume = chain.puts["volume"].sum()
+    call_volume = chain.calls["volume"].sum()
+    pcr = round(put_volume / call_volume, 2) if call_volume > 0 else 0
+    
     return {
         "ticker": ticker,
-        "current_price": current_price,
-        "expiration_date": expiry,
-        "contracts": results
+        "historical_volatility_30d": round(float(hv), 4),
+        "put_call_ratio": float(pcr),
+        "interpretation": "bearish" if pcr > 1 else "bullish"
     }
