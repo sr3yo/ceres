@@ -199,6 +199,7 @@ def get_iv_analysis(ticker: str):
     # comparing IV and HV
     iv_hv_ratio = round(float(avg_iv / hv_30), 2)
     
+    #analyze the ratio to give interpretation of whether options are cheap or expensive compared to historical volatility
     if iv_hv_ratio > 1.2:
         iv_interpretation = "options are expensive — IV significantly above HV"
     elif iv_hv_ratio < 0.8:
@@ -227,6 +228,7 @@ def get_contract_quality(ticker : str):
     calls = chain.calls.to_dict(orient="records")
     puts = chain.puts.to_dict(orient="records")
 
+    # analyze contracts based on bid-ask spread, open interest, and volume
     def analyze_contracts(contracts, contract_type):
         results = []
         for c in contracts:
@@ -319,3 +321,100 @@ def analyze_multiple(tickers: str):
     
     return results
 
+
+#route for scanner to display top 20 stocks
+@app.get("/scanner")
+def opportunity_scanner():
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "AMD", "NFLX", "BABA", "SPY", "QQQ", "INTC", "BA", "DIS", "UBER", "COIN", "PLTR", "SNAP", "ROKU"]
+    
+    opportunities = []
+    
+    for ticker in tickers:
+        try:
+            #stock price
+            api_key = os.getenv("POLYGON_API_KEY")
+            price_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev?apiKey={api_key}"
+            price_response = requests.get(price_url)
+            price_data = price_response.json()
+            current_price = price_data["results"][0]["c"]
+
+            #options data
+            stock = yf.Ticker(ticker)
+            expiration_dates = stock.options
+            future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
+            expiry = future_dates[0]
+            chain = stock.option_chain(expiry)
+
+            # iv analysis
+            hist = stock.history(period="30d")
+            hist["returns"] = hist["Close"].pct_change()
+            hv = hist["returns"].std() * (252 ** 0.5)
+            avg_iv = chain.calls["impliedVolatility"].median()
+            iv_hv_ratio = round(float(avg_iv / hv), 2)
+
+            # process calls separately
+            calls = chain.calls.to_dict(orient="records")
+            puts = chain.puts.to_dict(orient="records")
+
+            T = get_time_to_expiry(expiry)
+
+            for contract in calls:
+                strike = contract["strike"]
+                market_premium = contract["lastPrice"]
+                iv = contract["impliedVolatility"]
+
+                #adding condition to only show contracts with significant mispricing and positive theoretical price to avoid noise; also ensuring T and iv are positive to avoid errors in black scholes
+                if T > 0 and iv > 0 and market_premium > 0:
+                    theoretical_price = black_scholes(current_price, strike, T, 0.05, iv, "call")
+                    mispricing = round(market_premium - theoretical_price, 2)
+
+                    if theoretical_price > 0 and abs(mispricing) > 0.5:
+                        opportunities.append({
+                            "ticker": ticker,
+                            "contract": contract["contractSymbol"],
+                            "type": "call",
+                            "strike": strike,
+                            "current_price": current_price,
+                            "market_premium": market_premium,
+                            "theoretical_price": theoretical_price,
+                            "mispricing": mispricing,
+                            "overpriced": bool(mispricing > 0),
+                            "iv_hv_ratio": iv_hv_ratio
+                        })
+
+            for contract in puts:
+                strike = contract["strike"]
+                market_premium = contract["lastPrice"]
+                iv = contract["impliedVolatility"]
+
+                #same conditions for puts to ensure we only show meaningful opportunities with positive theoretical price and significant mispricing, also ensuring T and iv are positive
+                if T > 0 and iv > 0 and market_premium > 0:
+                    theoretical_price = black_scholes(current_price, strike, T, 0.05, iv, "put")
+                    mispricing = round(market_premium - theoretical_price, 2)
+
+                    #quality filter to only show contracts with significant mispricing and positive theoretical price to avoid noise; also ensuring T and iv are positive to avoid errors in black scholes
+                    if theoretical_price > 0 and abs(mispricing) > 0.5:
+                        opportunities.append({
+                            "ticker": ticker,
+                            "contract": contract["contractSymbol"],
+                            "type": "put",
+                            "strike": strike,
+                            "current_price": current_price,
+                            "market_premium": market_premium,
+                            "theoretical_price": theoretical_price,
+                            "mispricing": mispricing,
+                            "overpriced": bool(mispricing > 0),
+                            "iv_hv_ratio": iv_hv_ratio
+                        })
+
+        except Exception as e:
+            print(f"Error with {ticker}: {e}")
+            continue
+
+    opportunities.sort(key=lambda x: abs(x["mispricing"]), reverse=True)
+
+    return {
+        "scan_time": datetime.now().isoformat(),
+        "total_opportunities": len(opportunities),
+        "top_opportunities": opportunities[:10]
+    }
