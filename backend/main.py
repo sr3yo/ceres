@@ -166,3 +166,48 @@ def get_historical_volatility(ticker: str):
         "put_call_ratio": float(pcr),
         "interpretation": "bearish" if pcr > 1 else "bullish"
     }
+
+@app.get("/iv-analysis/{ticker}")
+def get_iv_analysis(ticker: str):
+    stock = yf.Ticker(ticker)
+    
+    # getting 1 year of historical data
+    hist = stock.history(period="1y")
+    hist["returns"] = hist["Close"].pct_change()
+    
+    # 30 day data
+    hv_30 = hist["returns"].tail(30).std() * (252 ** 0.5)
+    
+    # calculate rolling 30day HV for entire year for percentile
+    rolling_hv = hist["returns"].rolling(30).std() * (252 ** 0.5)
+    
+    # IV from options
+    expiration_dates = stock.options
+    future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
+    expiry = future_dates[0]
+    chain = stock.option_chain(expiry)
+    
+    
+    avg_iv = chain.calls["impliedVolatility"].median()
+    
+    
+    iv_percentile = round(float((rolling_hv < avg_iv).sum() / len(rolling_hv.dropna()) * 100), 2)
+    
+    # comparing IV and HV
+    iv_hv_ratio = round(float(avg_iv / hv_30), 2)
+    
+    if iv_hv_ratio > 1.2:
+        iv_interpretation = "options are expensive — IV significantly above HV"
+    elif iv_hv_ratio < 0.8:
+        iv_interpretation = "options are cheap — IV significantly below HV"
+    else:
+        iv_interpretation = "options are fairly priced — IV close to HV"
+    
+    return {
+        "ticker": ticker,
+        "current_iv": round(float(avg_iv), 4),
+        "historical_volatility_30d": round(float(hv_30), 4),
+        "iv_hv_ratio": iv_hv_ratio,
+        "iv_percentile": iv_percentile,
+        "interpretation": iv_interpretation
+    }
