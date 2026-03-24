@@ -47,6 +47,7 @@ def getYfOptions(ticker : str):
         "calls": calls
     }
 
+#route for analysis
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     # get stock price from polygon
@@ -139,6 +140,7 @@ def analyze(ticker: str):
 }
 
 
+#route to get volatility 
 @app.get("/volatility/{ticker}")
 def get_historical_volatility(ticker: str):
     stock = yf.Ticker(ticker)
@@ -167,6 +169,7 @@ def get_historical_volatility(ticker: str):
         "interpretation": "bearish" if pcr > 1 else "bullish"
     }
 
+#route for iv analysis; historical vs implied 
 @app.get("/iv-analysis/{ticker}")
 def get_iv_analysis(ticker: str):
     stock = yf.Ticker(ticker)
@@ -210,4 +213,60 @@ def get_iv_analysis(ticker: str):
         "iv_hv_ratio": iv_hv_ratio,
         "iv_percentile": iv_percentile,
         "interpretation": iv_interpretation
+    }
+
+#route to determine if its worth it to enter the trade, or if its not
+@app.get("/contract-quality/{ticker}")
+def get_contract_quality(ticker : str):
+    stock = yf.Ticker(ticker)
+    expiration_dates = stock.options
+    future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
+    expiry = future_dates[0]
+    chain = stock.option_chain(expiry)
+
+    calls = chain.calls.to_dict(orient="records")
+    puts = chain.puts.to_dict(orient="records")
+
+    def analyze_contracts(contracts, contract_type):
+        results = []
+        for c in contracts:
+            bid = c.get("bid", 0)
+            ask = c.get("ask", 0)
+            spread = round(ask - bid, 2)
+            #spread formula; IMPORTANT REMEMBER FOR LATER
+            spread_pct = round((spread / ask * 100), 2) if ask > 0 else 0 
+
+            open_interest = c.get("openInterest", 0)
+            volume = c.get("volume", 0)
+
+            #GET THE QUALITY SCORE HERE 
+            if spread_pct < 5 and open_interest > 100:
+                quality = "high"
+            elif spread_pct < 15 and open_interest > 10:
+                quality = "medium"
+            else:
+                quality = "low"
+            
+            results.append({
+                "contract": c["contractSymbol"],
+                "type": contract_type,
+                "strike": c["strike"],
+                "bid": bid,
+                "ask": ask,
+                "spread": spread,
+                "spread_pct": spread_pct,
+                "open_interest": open_interest,
+                "volume": volume if volume else 0,
+                "liquidity_quality": quality
+            })
+        return results
+    
+    call_quality = analyze_contracts(calls, "call")
+    put_quality = analyze_contracts(puts, "put")
+    
+    return {
+        "ticker": ticker,
+        "expiration_date": expiry,
+        "calls": call_quality,
+        "puts": put_quality
     }
