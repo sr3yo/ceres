@@ -270,3 +270,52 @@ def get_contract_quality(ticker : str):
         "calls": call_quality,
         "puts": put_quality
     }
+
+#route for multi tickers
+@app.get("/analyze/multiple/{tickers}")
+def analyze_multiple(tickers: str):
+    ticker_list = tickers.split(",")
+    results = {}
+    
+    for ticker in ticker_list:
+        try:
+            # for the stock price
+            api_key = os.getenv("POLYGON_API_KEY")
+            price_url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev?apiKey={api_key}"
+            price_response = requests.get(price_url)
+            price_data = price_response.json()
+            current_price = price_data["results"][0]["c"]
+
+            # get the options data
+            stock = yf.Ticker(ticker)
+            expiration_dates = stock.options
+            future_dates = [d for d in expiration_dates if d > (datetime.today() + timedelta(days=30)).strftime("%Y-%m-%d")]
+            expiry = future_dates[0]
+            chain = stock.option_chain(expiry)
+
+            # iv analysis
+            hist = stock.history(period="30d")
+            hist["returns"] = hist["Close"].pct_change()
+            hv = hist["returns"].std() * (252 ** 0.5)
+            avg_iv = chain.calls["impliedVolatility"].median()
+            iv_hv_ratio = round(float(avg_iv / hv), 2)
+
+            # put/call ratio
+            put_volume = chain.puts["volume"].sum()
+            call_volume = chain.calls["volume"].sum()
+            pcr = round(put_volume / call_volume, 2) if call_volume > 0 else 0
+
+            results[ticker] = {
+                "current_price": current_price,
+                "expiration_date": expiry,
+                "avg_iv": round(float(avg_iv), 4),
+                "historical_volatility": round(float(hv), 4),
+                "iv_hv_ratio": iv_hv_ratio,
+                "put_call_ratio": float(pcr),
+                "sentiment": "bearish" if pcr > 1 else "bullish"
+            }
+        except Exception as e:
+            results[ticker] = {"error": str(e)}
+    
+    return results
+
