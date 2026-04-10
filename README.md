@@ -21,7 +21,7 @@ For any given ticker, Ceres:
 ---
 
 ## Black-Scholes & Greeks
-
+We would like to preface by saying, we are NOT experts when it comes to quantiative math. With a few simple docs online alongside research papers, we were able to use the following formulas.
 The core pricing model is Black-Scholes, which derives a theoretical option premium from five inputs: current stock price (S), strike price (K), time to expiration in years (T), risk-free rate (r), and implied volatility (σ).
 
 The model computes two intermediate values — d1 and d2 — which feed into the cumulative normal distribution to produce the call or put price. Ceres uses the implied volatility directly from the live options chain rather than estimating it, which means the theoretical price reflects what the market *should* be pricing given its own volatility assumptions.
